@@ -11,7 +11,9 @@ module Locksmith
   class Cipher
     CIPHER_NAME          = "aes-256-cbc"
     CIPHER_MARK          = CIPHER_NAME + ";"
-    KEY_FILE_START_MARK  = ("KEY:" + CIPHER_MARK).to_slice
+    CIPHER_SALT_SIZE     = 16
+    CIPHER_KEY_SIZE      = 32
+    KEY_FILE_START_MARK  = ("LOCKSMITH:" + CIPHER_MARK).to_slice
     KEY_FILE_CIPHER_MARK = CIPHER_MARK.to_slice
 
     # The file where the cipher key is stored
@@ -96,17 +98,17 @@ module Locksmith
       raise IO::Error.new("malformed key file: #{filename}") unless contents[0..(KEY_FILE_START_MARK.size - 1)] == KEY_FILE_START_MARK
 
       # first n bytes is the start mark, next 256 bytes is the prefix, next 32 bytes is the intermediate key used to encrypt the cipher key
-      intermediate_key = contents[(256 + KEY_FILE_START_MARK.size)..(287 + KEY_FILE_START_MARK.size)]
+      intermediate_key = contents[(CIPHER_SALT_SIZE + KEY_FILE_START_MARK.size)..(CIPHER_SALT_SIZE + CIPHER_KEY_SIZE + KEY_FILE_START_MARK.size - 1)]
       # remaining bytes is the encrypted cipher key and salt
-      encrypted_cipher_contents = contents[(288 + KEY_FILE_START_MARK.size)..]
+      encrypted_cipher_contents = contents[(CIPHER_SALT_SIZE + CIPHER_KEY_SIZE + KEY_FILE_START_MARK.size)..]
 
       # decrypt cipher key with intermediate key
       cipher_contents = decrypt(intermediate_key, encrypted_cipher_contents)
       # ensure cipher contents is well formed
-      raise IO::Error.new("malformed key file: #{filename}") unless cipher_contents.size == (288 + KEY_FILE_CIPHER_MARK.size) || cipher_contents[0..(KEY_FILE_CIPHER_MARK.size - 1)] == KEY_FILE_CIPHER_MARK
+      raise IO::Error.new("malformed key file: #{filename}") unless cipher_contents.size == (CIPHER_SALT_SIZE + CIPHER_KEY_SIZE + KEY_FILE_CIPHER_MARK.size) || cipher_contents[0..(KEY_FILE_CIPHER_MARK.size - 1)] == KEY_FILE_CIPHER_MARK
 
       # first n bytes is the start mark, next 32 bytes is the cipher key, the remaining 256 bytes is the salt
-      cipher_key = cipher_contents[KEY_FILE_CIPHER_MARK.size..(31 + KEY_FILE_CIPHER_MARK.size)]
+      cipher_key = cipher_contents[KEY_FILE_CIPHER_MARK.size..(CIPHER_KEY_SIZE + KEY_FILE_CIPHER_MARK.size - 1)]
     rescue ex : OpenSSL::Cipher::Error
       raise IO::Error.new("malformed key file: #{filename}", ex)
     end
@@ -121,52 +123,58 @@ module Locksmith
       else
         raise IO::Error.new("executable path not found")
       end
+    rescue ex
+      "master.key"
     end
 
-    # Creates new intermediate and cipher keys and stores them in the key file encrypted with the master key
+    # Creates new intermediate and cipher keys and stores them in the key file
+    # encrypted with the master key
     private def create_key_file(filename : String) : Nil
       raise "key file must not exist: #{filename}" if File.exists?(filename)
 
-      prefix = Random::Secure.random_bytes(256)
-      cipher_key = Random::Secure.random_bytes(32)
-      intermediate_key = Random::Secure.random_bytes(32)
-      suffix = Random::Secure.random_bytes(256)
+      prefix = Random::Secure.random_bytes(CIPHER_SALT_SIZE)
+      cipher_key = Random::Secure.random_bytes(CIPHER_KEY_SIZE)
+      intermediate_key = Random::Secure.random_bytes(CIPHER_KEY_SIZE)
+      suffix = Random::Secure.random_bytes(CIPHER_SALT_SIZE)
 
       File.open(filename, "w") do |file|
         file.write encrypt(@master_key, KEY_FILE_START_MARK + prefix + intermediate_key + encrypt(intermediate_key, KEY_FILE_CIPHER_MARK + cipher_key + suffix))
       end
     end
 
-    # Encrypts the given text *data* with the given *key* returning
-    # a base64-encoded string
+    # Encrypts the given text *data* with the given *key* returning a base64-
+    # encoded string
     private def encrypt(key : Bytes, data : String) : String
       Base64.strict_encode(encrypt(key, data.to_slice))
     end
 
-    # Decrypts the given base64-encoded encrypted *data* with
-    # the given *key* returning the decrypted text
+    # Decrypts the given base64-encoded encrypted *data* with the given *key*
+    # returning the decrypted text
     private def decrypt(key : Bytes, data : String) : String
       String.new decrypt(key, Base64.decode(data))
     end
 
-    # Encrypts the given *data* with the given *key* returning
-    # the encrypted data
+    # Encrypts the given *data* with the given *key* returning the encrypted
+    # data
     private def encrypt(key : Bytes, data : Bytes) : Bytes
-      cipher(key, data) do |c|
+      salt = Random::Secure.random_bytes(CIPHER_SALT_SIZE)
+      cipher(key, salt + data) do |c|
         c.encrypt
       end
     end
 
-    # Decrypts the given *data* with the given *key* returning
-    # the decrypted data
+    # Decrypts the given *data* with the given *key* returning the decrypted
+    # data
     private def decrypt(key : Bytes, data : Bytes) : Bytes
-      cipher(key, data) do |c|
+      decrypted_data = cipher(key, data) do |c|
         c.decrypt
       end
+      # remove salt from decrypted data
+      decrypted_data[CIPHER_SALT_SIZE..]
     end
 
-    # Encrypts or decrypts the given *data* with the given *key*
-    # returning the result
+    # Encrypts or decrypts the given *data* with the given *key* returning the
+    # result
     private def cipher(key : Bytes, data : Bytes, &) : Bytes
       cipher = OpenSSL::Cipher.new(CIPHER_NAME)
 

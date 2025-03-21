@@ -1,6 +1,6 @@
 require "./spec_helper"
 
-describe Locksmith do
+describe Locksmith::Cipher do
   it "encrypts and decrypts" do
     master_key = Base64.decode("SNTYCJM+9HHo+OU898PQqB0BmREX6Q8vPm2XAi1g5JU=")
     cipher = Locksmith::Cipher.new(master_key)
